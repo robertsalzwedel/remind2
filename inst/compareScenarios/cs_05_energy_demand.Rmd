@@ -25,6 +25,21 @@ showAreaAndBarPlots(data, items, tot, orderVars = "user", scales = "fixed")
 showAreaAndBarPlots(data, items, tot, orderVars = "user", fill = TRUE)
 ```
 
+### FE Liquids
+```{r FE all sectors - carrier share - Bar  }
+tot_allliq <- "FE"
+items_allliq <- c(
+  "FE|Electricity",
+  "FE|Hydrogen",  
+  "FE|Heat",
+  "FE|Gases",
+  "FE|Liquids",
+  "FE|Solids",
+  NULL
+)
+showAreaAndBarPlots(data, items_allliq, tot_allliq, orderVars = "user", fill = TRUE)
+```
+
 ### FE Line Plots
 #### Electricity
 ```{r Electricity}
@@ -512,6 +527,25 @@ items_synliq <- c(
 )
 
 showAreaAndBarPlots(data, items_synliq, tot_synliq, orderVars = "user", scales = "fixed")
+
+```
+
+#### FE Transport w/ Bunkers Liquids by mode - Bar
+```{r FE Transport w/ Bunkers Liquid by mode - Bar}
+tot_liq <- "FE|Transport|Liquids"
+items_liq <- c(
+  "FE|Transport|Pass|Road|LDV|Liquids",
+  "FE|Transport|Freight|Road|Liquids",
+  "FE|Transport|Pass|Road|Bus|Liquids",
+  "FE|Transport|Freight|Rail|Liquids",
+  "FE|Transport|Pass|Rail|Liquids",
+  "FE|Transport|Pass|Domestic Aviation|Liquids",
+  "FE|Transport|Bunkers|Pass|International Aviation|Liquids",
+  "FE|Transport|Bunkers|Freight|International Shipping|Liquids",
+  NULL
+)
+
+showAreaAndBarPlots(data, items_liq, tot_liq, orderVars = "user", scales = "fixed")
 
 ```
 
