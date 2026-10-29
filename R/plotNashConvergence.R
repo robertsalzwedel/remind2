@@ -9,23 +9,20 @@
 #'     plotNashConvergence(gdx="fulldata.gdx")
 #'   }
 #'
-#' @importFrom gdx readGDX
 #' @importFrom dplyr summarise group_by mutate filter distinct case_when
 #' @importFrom quitte as.quitte
-#' @importFrom data.table :=
 #' @importFrom mip plotstyle
-#' @importFrom ggplot2 scale_y_continuous scale_x_continuous scale_y_discrete
-#'              scale_fill_manual scale_color_manual coord_cartesian aes_ geom_rect
-#'              theme geom_point geom_hline
+#' @importFrom ggplot2 ggplot scale_y_continuous scale_x_continuous scale_y_discrete
+#'             scale_fill_manual scale_color_manual labs element_text facet_grid
+#'             coord_cartesian aes_ geom_rect geom_point geom_line theme theme_minimal
 #' @importFrom plotly ggplotly config hide_legend subplot layout
-#' @importFrom reshape2 dcast
 #'
 #' @export
 plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
   .generatePlots <- function(gdx) {
 
-    lastIteration <- readGDX(gdx, name = "o_iterationNumber", react = "error")[[1]]
+    lastIteration <- gdx2::readGDX(gdx, name = "o_iterationNumber", react = "error")[[1]]
 
     aestethics <- list(
       "alpha" = 0.6,
@@ -39,16 +36,27 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     subplots <- list()
 
-    activeCriteria <- suppressWarnings(gdx::readGDX(gdx, "activeConvMessage80"))
+    activeCriteria <- gdx2::readGDX(gdx, "activeConvMessage80")
+
+    # convergence tolerances, read from the gdx with fallbacks to the historical
+    # hardcoded defaults for older gdx files (see main.gms / nash postsolve.gms)
+    objValConvTol <- suppressWarnings(as.numeric(gdx2::readGDX(gdx, "cm_nashObjVal_tolerance", react = "silent")))
+    if (length(objValConvTol) == 0 || is.na(objValConvTol)) objValConvTol <- 1e-4
+
+    devPriceAnticipTolFactor <- suppressWarnings(as.numeric(gdx2::readGDX(gdx, "cm_DevPriceAnticip_tolFactor", react = "silent")))
+    if (length(devPriceAnticipTolFactor) == 0 || is.na(devPriceAnticipTolFactor)) devPriceAnticipTolFactor <- 0.1
+
+    taxConvTol <- suppressWarnings(as.numeric(gdx2::readGDX(gdx, "cm_TaxConv_tolerance", react = "silent")))
+    if (length(taxConvTol) == 0 || is.na(taxConvTol)) taxConvTol <- 0.001
 
     # Feasibility -----
-    p80RepyIteration <- readGDX(gdx, name = "p80_repy_iteration", restore_zeros = FALSE, react = "error") %>%
+    p80RepyIteration <- gdx2::readGDX(gdx, name = "p80_repy_iteration", restoreZeros = FALSE, react = "error") %>%
       as.quitte() %>%
       select(c("solveinfo80", "region", "iteration", "value")) %>%
-      dcast(region + iteration ~ solveinfo80, value.var = "value") %>%
+      tidyr::pivot_wider(names_from = "solveinfo80") %>%
       mutate(
-        "iteration" := as.numeric(as.character(.data$iteration)),
-        "convergence" := case_when(
+        "iteration" = as.numeric(as.character(.data$iteration)),
+        "convergence" = case_when(
           .data$modelstat == 1 & .data$solvestat == 1 ~ "optimal",
           .data$modelstat == 2 & .data$solvestat == 1 ~ "optimal",
           .data$modelstat == 7 & .data$solvestat == 4 ~ "feasible",
@@ -92,26 +100,26 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Optimality / Objective Deviation ----
 
-    p80ConvNashObjValIter <- readGDX(gdx, name = "p80_convNashObjVal_iter", react = "error") %>%
+    p80ConvNashObjValIter <- gdx2::readGDX(gdx, name = "p80_convNashObjVal_iter", react = "error") %>%
       as.quitte() %>%
       select(c("region", "iteration", "objvalDifference" = "value")) %>%
-      mutate("iteration" := as.numeric(as.character(.data$iteration))) %>%
+      mutate("iteration" = as.numeric(as.character(.data$iteration))) %>%
       filter(.data$iteration <= lastIteration)
 
-    p80RepyIteration <- readGDX(gdx, name = "p80_repy_iteration", restore_zeros = FALSE, react = "error") %>%
+    p80RepyIteration <- gdx2::readGDX(gdx, name = "p80_repy_iteration", restoreZeros = FALSE, react = "error") %>%
       as.quitte() %>%
       select(c("solveinfo80", "region", "iteration", "value")) %>%
-      mutate("iteration" := as.numeric(as.character(.data$iteration))) %>%
-      dcast(region + iteration ~ solveinfo80, value.var = "value")
+      mutate("iteration" = as.numeric(as.character(.data$iteration))) %>%
+      tidyr::pivot_wider(names_from = "solveinfo80")
 
     p80RepyIteration <- p80RepyIteration %>%
       left_join(p80ConvNashObjValIter, by = c("region", "iteration")) %>%
       group_by(.data$region) %>%
       mutate(
         "objvalCondition" = ifelse(.data$modelstat == "2", TRUE,
-          ifelse(.data$modelstat == "7" & is.na(.data$objvalDifference), FALSE,
-            ifelse(.data$modelstat == "7" & .data$objvalDifference < -1e-4, FALSE, TRUE)
-          )
+                                   ifelse(.data$modelstat == "7" & is.na(.data$objvalDifference), FALSE,
+                                          ifelse(.data$modelstat == "7" & .data$objvalDifference < -objValConvTol, FALSE, TRUE)
+                                   )
         )
       ) %>%
       ungroup() %>%
@@ -123,8 +131,8 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
       select("iteration", "objvalConverge") %>%
       distinct() %>%
       mutate(
-        "objVarCondition" := ifelse(.data$objvalConverge, "yes", "no"),
-        "tooltip" := paste0("Iteration: ", .data$iteration, "<br>Converged")
+        "objVarCondition" = ifelse(.data$objvalConverge, "yes", "no"),
+        "tooltip" = paste0("Iteration: ", .data$iteration, "<br>Converged")
       )
 
     for (iter in unique(data$iteration)) {
@@ -140,7 +148,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
         }
         tooltip <- paste0(
           "Iteration: ", iter, "<br>Not converged",
-          "<br>Region | Deviation", tooltip, "<br>The deviation limit is +- 0.0001"
+          "<br>Region | Deviation", tooltip, "<br>The deviation limit is +- ", objValConvTol
         )
         data[which(data$iteration == iter), ]$tooltip <- tooltip
       }
@@ -149,9 +157,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
     objVarSummary <- suppressWarnings(ggplot(data, aes_(
       x = ~iteration, y = "Objective\nDeviation",
       fill = ~objVarCondition, text = ~tooltip
-    ))) +
-      geom_hline(yintercept = 0) +
-      theme_minimal() +
+    ))) +      theme_minimal() +
       geom_point(size = 2, alpha = aestethics$alpha) +
       scale_fill_manual(values = booleanColor) +
       scale_y_discrete(breaks = c("Objective\nDeviation"), drop = FALSE) +
@@ -164,37 +170,37 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Trade goods surplus detail ----
 
-    surplus <- readGDX(gdx, name = "p80_surplusMax_iter", restore_zeros = FALSE, react = "error")[, c(2100, 2150), ] %>%
+    surplus <- gdx2::readGDX(gdx, name = "p80_surplusMax_iter", restoreZeros = FALSE, react = "error")[, c(2100, 2150), ] %>%
       as.quitte() %>%
       select(c("period", "value", "all_enty", "iteration")) %>%
       mutate(
-        "iteration" := as.numeric(as.character(.data$iteration)),
-        "value" := ifelse(is.na(.data$value), 0, .data$value),
-        "type" := case_when(
+        "iteration" = as.numeric(as.character(.data$iteration)),
+        "value" = ifelse(is.na(.data$value), 0, .data$value),
+        "type" = case_when(
           .data$all_enty == "good" ~ "Goods trade surplus",
           .data$all_enty == "perm" ~ "Permits",
           TRUE ~ "Primary energy trade surplus"
         )
       )
 
-    p80SurplusMaxTolerance <- readGDX(gdx, name = "p80_surplusMaxTolerance", restore_zeros = FALSE, react = "error") %>%
+    p80SurplusMaxTolerance <- gdx2::readGDX(gdx, name = "p80_surplusMaxTolerance", restoreZeros = FALSE, react = "error") %>%
       as.quitte() %>%
       select(c("maxTol" = 7, "all_enty" = 8))
 
     surplus <- left_join(surplus, p80SurplusMaxTolerance, by = "all_enty") %>%
       mutate(
-        "maxTol" := ifelse(.data$period == 2150, .data$maxTol * 10, .data$maxTol),
-        "withinLimits" := ifelse(.data$value > .data$maxTol, "no", "yes")
+        "maxTol" = ifelse(.data$period == 2150, .data$maxTol * 10, .data$maxTol),
+        "withinLimits" = ifelse(.data$value > .data$maxTol, "no", "yes")
       )
 
     data <- surplus
 
     data$tooltip <- paste0(
       ifelse(data$withinLimits == "no",
-        paste0(data$all_enty, " trade surplus (", data$value,
-               ") is greater than maximum tolerance (", data$maxTol, ")."),
-        paste0(data$all_enty, " trade surplus (", data$value,
-               ") is within tolerance (", data$maxTol, ").")
+             paste0(data$all_enty, " trade surplus (", data$value,
+                    ") is greater than maximum tolerance (", data$maxTol, ")."),
+             paste0(data$all_enty, " trade surplus (", data$value,
+                    ") is within tolerance (", data$maxTol, ").")
       ),
       "<br>Iteration: ", data$iteration
     )
@@ -211,8 +217,8 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
         "tooltip" = paste0(
           .data$type,
           ifelse(.data$withinLimits == "no",
-            " outside tolerance limits.",
-            " within tolerance limits."
+                 " outside tolerance limits.",
+                 " within tolerance limits."
           )
         )
       )
@@ -293,9 +299,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     surplusSummary <- suppressWarnings(ggplot(surplusCondition,
                                               aes_(x = ~iteration, y = "Max. Trade\nSurplus",
-                                                   fill = ~withinLimits, text = ~tooltip))) +
-      geom_hline(yintercept = 0) +
-      theme_minimal() +
+                                                   fill = ~withinLimits, text = ~tooltip))) +      theme_minimal() +
       geom_point(size = 2, alpha = aestethics$alpha) +
       scale_fill_manual(values = booleanColor) +
       scale_y_discrete(breaks = c("Max. Trade\nSurplus"), drop = FALSE) +
@@ -306,31 +310,31 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Deviation due to price anticipation ----
 
-    maxTolerance <- readGDX(gdx,
-      name = "p80_surplusMaxTolerance",
-      restore_zeros = FALSE, react = "error"
+    maxTolerance <- gdx2::readGDX(gdx,
+                                  name = "p80_surplusMaxTolerance",
+                                  restoreZeros = FALSE, react = "error"
     )[, , "good"] %>%
       as.numeric()
 
-    data <- readGDX(gdx,
-      name = "p80_DevPriceAnticipGlobAllMax2100Iter",
-      restore_zeros = FALSE, react = "error"
+    data <- gdx2::readGDX(gdx,
+                          name = "p80_DevPriceAnticipGlobAllMax2100Iter",
+                          restoreZeros = FALSE, react = "error"
     ) %>%
       as.quitte() %>%
       select("iteration", "value") %>%
       mutate(
-        "iteration" := as.numeric(as.character(.data$iteration)),
-        "converged" = ifelse(.data$value > 0.1 * maxTolerance, "no", "yes"),
-        "tooltip" = ifelse(.data$value > 0.1 * maxTolerance,
-          paste0(
-            "Iteration: ", .data$iteration, "<br>",
-            "Not converged<br>Price Anticipation deviation is not low enough<br>",
-            round(.data$value, 5), " > ", 0.1 * maxTolerance
-          ),
-          paste0(
-            "Iteration: ", .data$iteration, "<br>",
-            "Converged"
-          )
+        "iteration" = as.numeric(as.character(.data$iteration)),
+        "converged" = ifelse(.data$value > devPriceAnticipTolFactor * maxTolerance, "no", "yes"),
+        "tooltip" = ifelse(.data$value > devPriceAnticipTolFactor * maxTolerance,
+                           paste0(
+                             "Iteration: ", .data$iteration, "<br>",
+                             "Not converged<br>Price Anticipation deviation is not low enough<br>",
+                             round(.data$value, 5), " > ", devPriceAnticipTolFactor * maxTolerance
+                           ),
+                           paste0(
+                             "Iteration: ", .data$iteration, "<br>",
+                             "Converged"
+                           )
         ),
       )
 
@@ -353,16 +357,16 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Emission Market Deviation (optional) ----
 
-    pmEmiMktTarget <- readGDX(gdx, name = "pm_emiMktTarget", react = "silent", restore_zeros = FALSE)
+    pmEmiMktTarget <- gdx2::readGDX(gdx, name = "pm_emiMktTarget", react = "silent", restoreZeros = FALSE)
 
     if (!is.null(pmEmiMktTarget)) {
 
       pmEmiMktTargetDevIter <- suppressWarnings(
-        readGDX(gdx, name = "pm_emiMktTarget_dev_iter", react = "silent", restore_zeros = FALSE)
+        gdx2::readGDX(gdx, name = "pm_emiMktTarget_dev_iter", react = "silent", restoreZeros = FALSE)
       )
 
       pm_emiMktTarget_tolerance <- mip::getPlotData("pm_emiMktTarget_tolerance", gdx)
-      emiMktTarget_tolerance <- setNames(pm_emiMktTarget_tolerance$pm_emiMktTarget_tolerance,pm_emiMktTarget_tolerance$ext_regi)
+      emiMktTarget_tolerance <- setNames(pm_emiMktTarget_tolerance$pm_emiMktTarget_tolerance, pm_emiMktTarget_tolerance$ext_regi)
 
       pmEmiMktTargetDevIter <- pmEmiMktTargetDevIter %>%
         as.quitte() %>%
@@ -373,7 +377,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
       data <- pmEmiMktTargetDevIter %>%
         group_by(.data$iteration) %>%
         summarise(converged = ifelse(any(.data$converged == FALSE), "no", "yes")) %>%
-        mutate("tooltip" = paste0("Iteration: ", .data$iteration, "<br>","Converged"))
+        mutate("tooltip" = paste0("Iteration: ", .data$iteration, "<br>", "Converged"))
 
       for (i in unique(pmEmiMktTargetDevIter$iteration)) {
         if (data[data$iteration == i, "converged"] == "no") {
@@ -405,9 +409,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
       emiMktTargetDev <- suppressWarnings(ggplot(data, aes_(
         x = ~iteration, y = "Emission Market\nTarget",
         fill = ~converged, text = ~tooltip
-      ))) +
-        geom_hline(yintercept = 0) +
-        theme_minimal() +
+      ))) +        theme_minimal() +
         geom_point(size = 2, alpha = aestethics$alpha) +
         scale_fill_manual(values = booleanColor) +
         scale_y_discrete(breaks = c("Emission Market\nTarget"), drop = FALSE) +
@@ -421,26 +423,26 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Implicit Quantity Target (optional) ----
 
-    pmImplicitQttyTarget <- readGDX(gdx, name = "pm_implicitQttyTarget", restore_zeros = FALSE,
-                                    react = "silent")
+    pmImplicitQttyTarget <- gdx2::readGDX(gdx, name = "pm_implicitQttyTarget", restoreZeros = FALSE,
+                                          react = "silent")
 
     if (!is.null(pmImplicitQttyTarget)) {
 
-      cmImplicitQttyTargetTolerance <- as.vector(readGDX(gdx, name = "cm_implicitQttyTarget_tolerance",
-                                                         react = "error"))
+      cmImplicitQttyTargetTolerance <- as.vector(gdx2::readGDX(gdx, name = "cm_implicitQttyTarget_tolerance",
+                                                               react = "error"))
 
-      pmImplicitQttyTarget <- readGDX(gdx, name = "pm_implicitQttyTarget", restore_zeros = FALSE, react = "error") %>%
+      pmImplicitQttyTarget <- gdx2::readGDX(gdx, name = "pm_implicitQttyTarget", restoreZeros = FALSE, react = "error") %>%
         as.quitte() %>%
-        select("period", "ext_regi", "taxType", "qttyTarget", "qttyTargetGroup")
+        select("period", "region", "taxType", "qttyTarget", "qttyTargetGroup")
 
-      pmImplicitQttyTargetIsLimited <- readGDX(gdx, name = "pm_implicitQttyTarget_isLimited", restore_zeros = FALSE, react = "error")
+      pmImplicitQttyTargetIsLimited <- gdx2::readGDX(gdx, name = "pm_implicitQttyTarget_isLimited", restoreZeros = FALSE, react = "error")
 
-      p80ImplicitQttyTargetDevIter <- readGDX(gdx, name = "p80_implicitQttyTarget_dev_iter",
-                                              restore_zeros = FALSE, react = "error") %>%
+      p80ImplicitQttyTargetDevIter <- gdx2::readGDX(gdx, name = "p80_implicitQttyTarget_dev_iter",
+                                                    restoreZeros = FALSE, react = "error") %>%
         as.quitte() %>%
-        select("period", "value", "iteration", "ext_regi", "qttyTarget", "qttyTargetGroup")
+        select("period", "value", "iteration", "region", "qttyTarget", "qttyTargetGroup")
 
-      if(all(lengths(attr(pmImplicitQttyTargetIsLimited, 'dimnames')) != 0)){
+      if (all(lengths(attr(pmImplicitQttyTargetIsLimited, "dimnames")) != 0)) {
         pmImplicitQttyTargetIsLimited <- pmImplicitQttyTargetIsLimited %>%
           as.quitte() %>%
           select("iteration", "qttyTarget", "qttyTargetGroup", "isLimited" = "value")
@@ -449,27 +451,25 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
       }
 
       p80ImplicitQttyTargetDevIter <- p80ImplicitQttyTargetDevIter %>%
-        left_join(pmImplicitQttyTarget, by = c("period", "ext_regi", "qttyTarget", "qttyTargetGroup")) %>%
+        left_join(pmImplicitQttyTarget, by = c("period", "region", "qttyTarget", "qttyTargetGroup")) %>%
         left_join(pmImplicitQttyTargetIsLimited, by = c("iteration", "qttyTarget", "qttyTargetGroup")) %>%
         mutate(
           "failed" =
             abs(.data$value) > cmImplicitQttyTargetTolerance & (
               !(ifelse(.data$taxType == "tax", .data$value < 0, FALSE)) |
-              ifelse(.data$taxType == "sub", .data$value > 0, FALSE)
+                ifelse(.data$taxType == "sub", .data$value > 0, FALSE)
             ) & .data$isLimited != 1
         )
 
       data <- p80ImplicitQttyTargetDevIter %>%
         group_by(.data$iteration) %>%
         summarise(converged = ifelse(any(.data$failed == TRUE), "no", "yes")) %>%
-        mutate("tooltip" = ifelse(.data$converged == "yes", paste0("Iteration: ", .data$iteration, "<br>","Converged"), paste0("Iteration: ", .data$iteration, "<br>","Not converged")))
+        mutate("tooltip" = ifelse(.data$converged == "yes", paste0("Iteration: ", .data$iteration, "<br>", "Converged"), paste0("Iteration: ", .data$iteration, "<br>", "Not converged")))
 
       qttyTarget <- suppressWarnings(ggplot(data, aes_(
         x = ~iteration, y = "Implicit Quantity\nTarget",
         fill = ~converged, text = ~tooltip
-      ))) +
-        geom_hline(yintercept = 0) +
-        theme_minimal() +
+      ))) +        theme_minimal() +
         geom_point(size = 2, alpha = aestethics$alpha) +
         scale_fill_manual(values = booleanColor) +
         scale_y_discrete(breaks = c("Implicit Quantity\nTarget"), drop = FALSE) +
@@ -481,16 +481,105 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     }
 
-    # Price Target (TODO) ->  pm_implicitPrice_NotConv, pm_implicitPePriceTarget
+    # Implicit FE Price Target (optional) ----
+    # The convergence criterion is |deviation| <= 5% (hardcoded in
+    # regiCarbonPrice/postsolve.gms). We read the per-iteration deviation and flag
+    # any iteration where a target exceeds the tolerance. Ignored ("ignConv") cases
+    # are only stored for the final iteration, so the intermediate coloring here is a
+    # close approximation of the criterion, see nashConvergence-priceTarget.html for detail.
 
-    # Primary energy price Target (TODO) ->  pm_implicitPePrice_NotConv, pm_implicitPePriceTarget
+    p47ImplicitPriceDevIter <- suppressWarnings(
+      gdx2::readGDX(gdx, name = "p47_implicitPrice_dev_iter", restoreZeros = FALSE, react = "silent")
+    )
+
+    if (!is.null(p47ImplicitPriceDevIter)) {
+
+      implicitPriceTol <- suppressWarnings(as.numeric(gdx2::readGDX(gdx, name = "cm_implicitPriceTarget_tolerance", react = "silent")))
+      if (length(implicitPriceTol) == 0 || is.na(implicitPriceTol)) implicitPriceTol <- 0.05
+
+      p47ImplicitPriceDevIter <- p47ImplicitPriceDevIter %>%
+        as.quitte() %>%
+        filter(!is.na(.data$value)) %>%
+        select("iteration", "value") %>%
+        mutate(
+          "iteration" = as.numeric(as.character(.data$iteration)),
+          "failed" = abs(.data$value) > implicitPriceTol
+        )
+
+      data <- p47ImplicitPriceDevIter %>%
+        group_by(.data$iteration) %>%
+        summarise(
+          converged = ifelse(any(.data$failed == TRUE), "no", "yes"),
+          worst = max(abs(.data$value))
+        ) %>%
+        mutate("tooltip" = ifelse(.data$converged == "yes",
+                                  paste0("Iteration: ", .data$iteration, "<br>Converged<br>Max |deviation|: ", round(100 * .data$worst, 2), "%"),
+                                  paste0("Iteration: ", .data$iteration, "<br>Not converged<br>Max |deviation|: ", round(100 * .data$worst, 2), "% > ", round(100 * implicitPriceTol, 2), "%")))
+
+      implicitPriceTargetDev <- suppressWarnings(ggplot(data, aes_(
+        x = ~iteration, y = "FE Price\nTarget",
+        fill = ~converged, text = ~tooltip
+      ))) +        theme_minimal() +
+        geom_point(size = 2, alpha = aestethics$alpha) +
+        scale_fill_manual(values = booleanColor) +
+        scale_y_discrete(breaks = c("FE Price\nTarget"), drop = FALSE) +
+        labs(x = NULL, y = NULL) +
+        theme(axis.text.y = element_text(colour = ifelse(("cm_implicitPriceTarget" %in% activeCriteria), activeCriteriaColor["true"], activeCriteriaColor["false"])))
+
+      implicitPriceTargetDevPlotly <- ggplotly(implicitPriceTargetDev, tooltip = c("text"))
+      subplots <- append(subplots, list(implicitPriceTargetDevPlotly))
+    }
+
+    # Implicit PE Price Target (optional) ----
+
+    p47ImplicitPePriceDevIter <- suppressWarnings(
+      gdx2::readGDX(gdx, name = "p47_implicitPePrice_dev_iter", restoreZeros = FALSE, react = "silent")
+    )
+
+    if (!is.null(p47ImplicitPePriceDevIter)) {
+
+      implicitPePriceTol <- suppressWarnings(as.numeric(gdx2::readGDX(gdx, name = "cm_implicitPePriceTarget_tolerance", react = "silent")))
+      if (length(implicitPePriceTol) == 0 || is.na(implicitPePriceTol)) implicitPePriceTol <- 0.05
+
+      p47ImplicitPePriceDevIter <- p47ImplicitPePriceDevIter %>%
+        as.quitte() %>%
+        filter(!is.na(.data$value)) %>%
+        select("iteration", "value") %>%
+        mutate(
+          "iteration" = as.numeric(as.character(.data$iteration)),
+          "failed" = abs(.data$value) > implicitPePriceTol
+        )
+
+      data <- p47ImplicitPePriceDevIter %>%
+        group_by(.data$iteration) %>%
+        summarise(
+          converged = ifelse(any(.data$failed == TRUE), "no", "yes"),
+          worst = max(abs(.data$value))
+        ) %>%
+        mutate("tooltip" = ifelse(.data$converged == "yes",
+                                  paste0("Iteration: ", .data$iteration, "<br>Converged<br>Max |deviation|: ", round(100 * .data$worst, 2), "%"),
+                                  paste0("Iteration: ", .data$iteration, "<br>Not converged<br>Max |deviation|: ", round(100 * .data$worst, 2), "% > ", round(100 * implicitPePriceTol, 2), "%")))
+
+      implicitPePriceTargetDev <- suppressWarnings(ggplot(data, aes_(
+        x = ~iteration, y = "PE Price\nTarget",
+        fill = ~converged, text = ~tooltip
+      ))) +        theme_minimal() +
+        geom_point(size = 2, alpha = aestethics$alpha) +
+        scale_fill_manual(values = booleanColor) +
+        scale_y_discrete(breaks = c("PE Price\nTarget"), drop = FALSE) +
+        labs(x = NULL, y = NULL) +
+        theme(axis.text.y = element_text(colour = ifelse(("cm_implicitPePriceTarget" %in% activeCriteria), activeCriteriaColor["true"], activeCriteriaColor["false"])))
+
+      implicitPePriceTargetDevPlotly <- ggplotly(implicitPePriceTargetDev, tooltip = c("text"))
+      subplots <- append(subplots, list(implicitPePriceTargetDevPlotly))
+    }
 
     # Global Bugdet Deviation (optional) ----
-    cm_budgetCO2_absDevTol <- as.vector(readGDX(gdx, name = "cm_budgetCO2_absDevTol", react = "error"))
-    p80_globalBudget_absDev_iter <- readGDX(gdx, name = "p80_globalBudget_absDev_iter",
-                                      restore_zeros = FALSE, react = "error")
+    cm_budgetCO2_absDevTol <- as.vector(gdx2::readGDX(gdx, name = "cm_budgetCO2_absDevTol", react = "error"))
+    p80_globalBudget_absDev_iter <- gdx2::readGDX(gdx, name = "p80_globalBudget_absDev_iter",
+                                                  restoreZeros = FALSE, react = "error")
 
-    if(all(lengths(attr(p80_globalBudget_absDev_iter, 'dimnames')) != 0)){
+    if (all(lengths(attr(p80_globalBudget_absDev_iter, "dimnames")) != 0)) {
 
       p80_globalBudget_absDev_iter <- p80_globalBudget_absDev_iter %>%
         as.quitte() %>%
@@ -500,20 +589,18 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
       data <- p80_globalBudget_absDev_iter %>%
         mutate(
           "converged" = ifelse(.data$failed == TRUE, "no", "yes"),
-          "tooltip" = ifelse(.data$failed, paste0("Iteration: ", .data$iteration, "<br>","Not converged"), paste0("Iteration: ", .data$iteration, "<br>","Converged"))
+          "tooltip" = ifelse(.data$failed, paste0("Iteration: ", .data$iteration, "<br>", "Not converged"), paste0("Iteration: ", .data$iteration, "<br>", "Converged"))
         )
 
       globalBuget <- suppressWarnings(ggplot(data, aes_(
         x = ~iteration, y = "Global Budget\nDeviation",
         fill = ~converged, text = ~tooltip
-      ))) +
-        geom_hline(yintercept = 0) +
-        theme_minimal() +
+      ))) +        theme_minimal() +
         geom_point(size = 2, alpha = aestethics$alpha) +
         scale_fill_manual(values = booleanColor) +
         scale_y_discrete(breaks = c("Global Budget\nDeviation"), drop = FALSE) +
         labs(x = NULL, y = NULL) +
-        theme(axis.text.y = element_text(colour = ifelse(("target" %in% activeCriteria), activeCriteriaColor["true"], activeCriteriaColor["false"])))
+        theme(axis.text.y = element_text(colour = ifelse(("globalbudget" %in% activeCriteria), activeCriteriaColor["true"], activeCriteriaColor["false"])))
 
       globalBugetPlotly <- ggplotly(globalBuget, tooltip = c("text"))
       subplots <- append(subplots, list(globalBugetPlotly))
@@ -522,38 +609,36 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Internalized Damages (optional) ----
 
-    module2realisation <- readGDX(gdx, name = "module2realisation", react = "error")
+    module2realisation <- gdx2::readGDX(gdx, name = "module2realisation", react = "error")
     if (module2realisation[module2realisation$modules == "internalizeDamages", ][, 2] != "off") {
-      cmSccConvergence <- as.numeric(readGDX(gdx, name = "cm_sccConvergence",
-                                             types = c("parameters"), react = "error"))
-      cmTempConvergence <- as.numeric(readGDX(gdx, name = "cm_tempConvergence",
-                                              types = c("parameters"), react = "error"))
-      p80SccConvergenceMaxDeviationIter <- readGDX(gdx, name = "p80_sccConvergenceMaxDeviation_iter",
-                                                   react = "error") %>%
+      cmSccConvergence <- as.numeric(gdx2::readGDX(gdx, name = "cm_sccConvergence",
+                                                   type = "Parameter", react = "error"))
+      cmTempConvergence <- as.numeric(gdx2::readGDX(gdx, name = "cm_tempConvergence",
+                                                    type = "Parameter", react = "error"))
+      p80SccConvergenceMaxDeviationIter <- gdx2::readGDX(gdx, name = "p80_sccConvergenceMaxDeviation_iter",
+                                                         react = "error") %>%
         as.quitte() %>%
         select("iteration", "p80SccConvergenceMaxDeviationIter" = "value") %>%
-        mutate("iteration" := as.numeric(as.character(.data$iteration))) %>%
+        mutate("iteration" = as.numeric(as.character(.data$iteration))) %>%
         filter(.data$iteration <= lastIteration)
 
-      p80GmtConvIter <- readGDX(gdx, name = "p80_gmt_conv_iter", react = "error") %>%
+      p80GmtConvIter <- gdx2::readGDX(gdx, name = "p80_gmt_conv_iter", react = "error") %>%
         as.quitte() %>%
         select("iteration", "p80GmtConvIter" = "value") %>%
-        mutate("iteration" := as.numeric(as.character(.data$iteration))) %>%
+        mutate("iteration" = as.numeric(as.character(.data$iteration))) %>%
         filter(.data$iteration <= lastIteration)
 
       data <- left_join(p80SccConvergenceMaxDeviationIter, p80GmtConvIter, by = "iteration") %>%
         mutate(
           "converged" = ifelse(.data$p80SccConvergenceMaxDeviationIter > cmSccConvergence |
                                  .data$p80GmtConvIter >  cmTempConvergence, "no", "yes"),
-          "tooltip" = ifelse(.data$converged == "no", paste0("Iteration: ", .data$iteration, "<br>","Not converged"), paste0("Iteration: ", .data$iteration, "<br>","Converged"))
+          "tooltip" = ifelse(.data$converged == "no", paste0("Iteration: ", .data$iteration, "<br>", "Not converged"), paste0("Iteration: ", .data$iteration, "<br>", "Converged"))
         )
 
       damageInternalization <- suppressWarnings(ggplot(data, aes_(
         x = ~iteration, y = "Damage\nInternalization",
         fill = ~converged, text = ~tooltip
-      ))) +
-        geom_hline(yintercept = 0) +
-        theme_minimal() +
+      ))) +        theme_minimal() +
         geom_point(size = 2, alpha = aestethics$alpha) +
         scale_fill_manual(values = booleanColor) +
         scale_y_discrete(breaks = c("Damage\nInternalization"), drop = FALSE) +
@@ -566,21 +651,27 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Tax Convergence (optional) ----
 
-    cmTaxConvCheck <- as.vector(readGDX(gdx, name = "cm_TaxConvCheck", react = "error"))
+    cmTaxConvCheck <- as.vector(gdx2::readGDX(gdx, name = "cm_TaxConvCheck", react = "error"))
 
-    p80ConvNashTaxrevIter <- readGDX(gdx, name = "p80_convNashTaxrev_iter", restore_zeros = FALSE, react = "error") %>%
+    p80ConvNashTaxrevIter <- gdx2::readGDX(gdx, name = "p80_convNashTaxrev_iter", restoreZeros = FALSE, react = "error") %>%
       as.quitte() %>%
       select("region", "period", "iteration", "value") %>%
-      mutate("failed" = abs(.data$value) > 0.001)
+      mutate("failed" = abs(.data$value) > taxConvTol)
 
     data <- p80ConvNashTaxrevIter %>%
       group_by(.data$iteration) %>%
       summarise(converged = ifelse(any(.data$failed == TRUE), "no", "yes")) %>%
-      mutate("tooltip" = ifelse(.data$converged == "yes", paste0("Iteration: ", .data$iteration, "<br>","Converged"), paste0("Iteration: ", .data$iteration, "<br>","Not converged")))
+      mutate("tooltip" = ifelse(.data$converged == "yes", paste0("Iteration: ", .data$iteration, "<br>", "Converged"), paste0("Iteration: ", .data$iteration, "<br>", "Not converged")))
 
     for (i in unique(p80ConvNashTaxrevIter$iteration)) {
       if (data[data$iteration == i, "converged"] == "no") {
-        tmp <- filter(p80ConvNashTaxrevIter, .data$iteration == i, .data$failed == TRUE) %>%
+        failedIter <- filter(p80ConvNashTaxrevIter, .data$iteration == i, .data$failed == TRUE)
+        worstRow <- failedIter[which.max(abs(failedIter$value)), ]
+        worstStr <- paste0(
+          "<br>Worst: ", worstRow$region, " ", worstRow$period, " | ",
+          round(100 * worstRow$value, 3), "% of GDP (limit +-", round(100 * taxConvTol, 2), "%)"
+        )
+        tmp <- failedIter %>%
           mutate("item" = paste0(.data$region, " ", .data$period)) %>%
           select("region", "period", "item") %>%
           distinct()
@@ -588,7 +679,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
         if (nrow(tmp) > 10) {
           data[data$iteration == i, "tooltip"] <- paste0(
             "Iteration ", i, "<br>",
-            "Not converged:<br>",
+            "Not converged:", worstStr, "<br>",
             paste0(unique(tmp$region), collapse = ", "),
             "<br>",
             paste0(unique(tmp$period), collapse = ", ")
@@ -596,7 +687,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
         } else {
           data[data$iteration == i, "tooltip"] <- paste0(
             "Iteration ", i, "<br>",
-            "Not converged:<br>",
+            "Not converged:", worstStr, "<br>",
             paste0(unique(tmp$item), collapse = ", ")
           )
         }
@@ -608,9 +699,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
     taxConvergence <- suppressWarnings(ggplot(data, aes_(
       x = ~iteration, y = yLabel,
       fill = ~converged, text = ~tooltip
-    ))) +
-      geom_hline(yintercept = 0) +
-      theme_minimal() +
+    ))) +      theme_minimal() +
       geom_point(size = 2, alpha = aestethics$alpha) +
       scale_fill_manual(values = booleanColor) +
       scale_y_discrete(breaks = c(yLabel), drop = FALSE) +
@@ -622,15 +711,15 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
 
     # Price anticipation (optional) ----
 
-    cmMaxFadeoutPriceAnticip <- as.vector(readGDX(gdx, name = "cm_maxFadeoutPriceAnticip", react = "error"))
-    p80FadeoutPriceAnticipIter <- readGDX(gdx, name = "p80_fadeoutPriceAnticip_iter",
-                                          restore_zeros = FALSE, react = "error") %>%
+    cmMaxFadeoutPriceAnticip <- as.vector(gdx2::readGDX(gdx, name = "cm_maxFadeoutPriceAnticip", react = "error"))
+    p80FadeoutPriceAnticipIter <- gdx2::readGDX(gdx, name = "p80_fadeoutPriceAnticip_iter",
+                                                restoreZeros = FALSE, react = "error") %>%
       as.quitte() %>%
       select("iteration", "fadeoutPriceAnticip" = "value")
 
     data <- p80FadeoutPriceAnticipIter %>%
       mutate(
-        "iteration" := as.numeric(as.character(.data$iteration)),
+        "iteration" = as.numeric(as.character(.data$iteration)),
         "converged" = ifelse(.data$fadeoutPriceAnticip > cmMaxFadeoutPriceAnticip, "no", "yes"),
         "tooltip" = ifelse(
           .data$converged == "yes",
@@ -647,8 +736,8 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
         )
       )
 
-    iterationsXaxis <- unique(c(1,data$iteration[(data$iteration %% 5) == 0],max(data$iteration)))
-    iterationsXaxis <- iterationsXaxis[iterationsXaxis != max(data$iteration)-1]
+    iterationsXaxis <- unique(c(1, data$iteration[(data$iteration %% 5) == 0], max(data$iteration)))
+    iterationsXaxis <- iterationsXaxis[iterationsXaxis != max(data$iteration) - 1]
 
     priceAnticipation <- ggplot(data, aes_(x = ~iteration)) +
       geom_line(aes_(y = ~fadeoutPriceAnticip), alpha = 0.3, linewidth = aestethics$line$size) +
@@ -693,7 +782,7 @@ plotNashConvergence <- function(gdx) { # nolint cyclocomp_linter
     return(list())
   }
 
-  modelstat <- readGDX(gdx, name = "o_modelstat", react = "error")[[1]]
+  modelstat <- gdx2::readGDX(gdx, name = "o_modelstat", react = "error")[[1]]
 
   if (!(modelstat %in% c(1, 2, 3, 4, 5, 6, 7))) {
     warning("Run failed - Check code, pre-triangular infes ...")

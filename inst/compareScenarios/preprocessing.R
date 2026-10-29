@@ -25,7 +25,7 @@ pCapVariables <- tribble(
   "FE|Transport", "GJ/yr/pCap", 1e9,
   "FE|Buildings", "GJ/yr/pCap", 1e9,
   "FE|Industry", "GJ/yr/pCap", 1e9,
-  "FE|Transport|Pass with bunkers", "GJ/yr/pCap", 1e9,
+  "FE|Transport|Pass", "GJ/yr/pCap", 1e9,
   "FE|Transport|Bunkers|Pass|International Aviation", "GJ/yr/pCap", 1e9,
   "FE|Transport|Pass|Domestic Aviation", "GJ/yr/pCap", 1e9,
   "FE|Transport|Pass|Rail", "GJ/yr/pCap", 1e9,
@@ -63,7 +63,7 @@ pCapVariables <- tribble(
   "UE|Buildings|Heating|Solids", "GJ/yr/pCap", 1e9,
   "UE|Buildings|Heating", "GJ/yr/pCap", 1e9,
   "ES|Buildings|Floor Space", "m2/pCap", 1e9,
-  "ES|Transport|Pass with bunkers", "k pkm/yr/pCap", 1e6, # use kilo-passenger-kilometer to prevent too large numbers in the plots
+  "ES|Transport|Pass", "k pkm/yr/pCap", 1e6, # use kilo-passenger-kilometer to prevent too large numbers in the plots
   "ES|Transport|Pass|Short-Medium distance", "k pkm/yr/pCap", 1e6, # use kilo-passenger-kilometer to prevent too large numbers in the plots
   "ES|Transport|Pass|Aviation", "k pkm/yr/pCap", 1e6,
   "ES|Transport|Pass|Domestic Aviation", "k pkm/yr/pCap", 1e6,
@@ -77,7 +77,7 @@ pCapVariables <- tribble(
   "ES|Transport|Pass|Non-motorized|Cycle", "k pkm/yr/pCap", 1e6,
   "ES|Transport|Pass|Non-motorized|Walk", "k pkm/yr/pCap", 1e6,
   "ES|Transport|Pass|non-LDV", "k pkm/yr/pCap", 1e6,
-  "ES|Transport|Freight with bunkers", "k tkm/yr/pCap", 1e6,
+  "ES|Transport|Freight", "k tkm/yr/pCap", 1e6,
   "ES|Transport|Freight|Short-Medium distance", "k tkm/yr/pCap", 1e6,
   "ES|Transport|Freight|Road", "k tkm/yr/pCap", 1e6,
   "ES|Transport|Freight|Rail", "k tkm/yr/pCap", 1e6,
@@ -182,10 +182,37 @@ data <- data %>%
   mutate(variable = gsub("|Elec|", "|Electricity|", .data$variable, fixed = TRUE))
 
 
+# compute validation thresholds ----
+
+# If a validation config is given, run piamValidation on the scenario and
+# historical data and provide the resulting thresholds as a global option.
+# Line plots (see mip::createLinePlots()) show thresholds matching the
+# plotted variable, unit, region and period as colored background bands.
+if (!is.null(params$validationConfig)) {
+  if (requireNamespace("piamValidation", quietly = TRUE)) {
+    validationThresholds <- tryCatch({
+      valiData <- piamValidation::validateScenarios(
+        c(params$mifScen, params$mifHist),
+        config = params$validationConfig)
+      piamValidation::getThresholdBands(valiData)
+    },
+    error = function(e) {
+      warning("Computing validation thresholds failed, no thresholds will ",
+              "be shown. ", conditionMessage(e))
+      NULL
+    })
+    options(mip.validationThresholds = validationThresholds) # nolint
+  } else {
+    warning("Package piamValidation is not available, validationConfig is ",
+            "ignored.")
+  }
+}
+
 # remove preprocessing objects not to be used anymore ----
 varNames <- c(
   "dataGDP", "dataPCap", "dataPGdp", "dataPop",
-  "histRefModel", "pCapVariables", "pGdpVariables")
+  "histRefModel", "pCapVariables", "pGdpVariables",
+  "valiData", "validationThresholds")
 for (vn in varNames) if (exists(vn)) rm(list = vn)
 rm(varNames)
 rm(vn)
